@@ -1,0 +1,184 @@
+#!python3
+
+
+# parse args
+import argparse, os, sys, io, boto3, errno
+import configparser
+
+# Instantiate the parser
+parser = argparse.ArgumentParser(description='Optional app description')
+parser.add_argument('command', type=str,
+                    help='valid commands [upload|download|list|delete|mksite|init]')
+parser.add_argument('--album', type=str, help='Album name in cloud')
+parser.add_argument('--path', metavar='PHOTO_DIR', type=str, default=os.getcwd(), help='photo directory')
+parser.add_argument('--photo', type=str, help='Name of photo to delete from cloud')
+
+args = parser.parse_args()
+
+if not os.path.exists(args.path):
+    sys.exit("Please specify a valid file using the --path parameter.")
+
+command = args.command
+
+if command == 'init':
+    try:
+        os.makedirs(os.path.expanduser('~/.config/cloudphoto/'))
+    except OSError as exc: 
+        if exc.errno == errno.EEXIST and os.path.isdir(os.path.expanduser('~/.config/cloudphoto/')):
+            pass
+        else: sys.exit(exc)
+    aws_access_key_i = input('Enter aws_access_key_id:')
+    aws_secret_access_key = input('Enter aws_secret_access_key:')
+    bucket = input('Enter bucket name:')
+    f = open(os.path.expanduser('~/.config/cloudphoto/cloudphotorc'), "w")
+    f.write('[DEFAULT]\n')
+    f.write('bucket = ' + bucket + '\n')
+    f.write('aws_access_key_id = ' + aws_access_key_i + '\n')
+    f.write('aws_secret_access_key = ' + aws_secret_access_key + '\n')
+    f.write('region = ru-central1\n')
+    f.write('endpoint_url = https://storage.yandexcloud.net\n')
+    f.close()
+    sys.exit()
+
+# get secret and key_id
+try:
+    # f = open(os.path.expanduser('~/.config/cloudphoto/cloudphotorc'), "r").readlines()
+    config = configparser.ConfigParser()
+    config.read_file(open(os.path.expanduser('~/.config/cloudphoto/cloudphotorc')))
+except Exception:
+    sys.exit('ERROR: configuration was damaged, please reinitialize cloudphoto by the following command: cloudphoto init')
+
+try:
+    key_id = config.get('DEFAULT', 'aws_access_key_id')
+    secret_key = config.get('DEFAULT', 'aws_secret_access_key')
+    bucket = config.get('DEFAULT', 'bucket')
+    region = config.get('DEFAULT', 'region')
+    endpoint = config.get('DEFAULT', 'endpoint_url')
+except Exception as e:
+    sys.stderr.write(str(e) + '\n')
+    sys.exit('ERROR: configuration was damaged, please reinitialize cloudphoto by the following command: cloudphoto init')
+
+session = boto3.session.Session()
+s3 = session.client(
+    service_name='s3',
+    aws_access_key_id=key_id,
+    aws_secret_access_key=secret_key,
+    region_name=region,
+    endpoint_url=endpoint
+)
+
+if bucket not in [b['Name'] for b in s3.list_buckets()['Buckets']]:
+    try: s3.create_bucket(ACL='private', Bucket='cloudphoto')
+    except Exception as e: sys.stdout.write(str(e) + '\n')
+
+if command == 'upload':
+    if args.album == None:
+        sys.exit("Please specify album using the --album parameter.")
+    sys.stdout.write('Uploading photos from ' + args.path + ' to album ' + args.album + '\n')
+    photos = [f for f in os.listdir(args.path) if f.lower().endswith(('.png', '.jpg', 'jpeg', 'gif', 'tiff', 'svg', 'raw', 'webp', 'heif')) ]
+    if len(photos) == 0: sys.exit("There is no photos in the following dir: " + args.path)
+    for p in photos:
+        try:
+            s3.upload_file(args.path + '/' + p, bucket, args.album + '/' + p)
+            sys.stdout.write(p + ' was successfully uploaded\n')
+        except Exception as e:
+            sys.stdout.write('WARNING: ' + str(e) + '\n')
+    sys.stdout.write('Successfully uploaded\n')
+elif command == 'download':
+    if args.album == None:
+        sys.exit("ERROR: Please specify album using the --album parameter.")
+    response = s3.list_objects(Bucket=bucket, Prefix=args.album + '/')
+    try:
+        files = [f['Key'] for f in response['Contents']]
+    except:
+        sys.exit('Album: ' + args.album + ' - was not found')
+    for f in files:
+        try:
+            s3.download_file(bucket, f, args.path + '/' +  f.split('/')[1])
+            sys.stdout.write(f + ' successfully downloaded\n')
+        except Excetion as e:
+            sys.stdout.write('WARNING: ' + str(e) + '\n')
+    sys.stdout.write('Successfully downloaded\n')
+elif command == 'list':
+    if args.album == None:
+        try:
+            albums = set([f['Key'].split('/')[0] for f in s3.list_objects(Bucket=bucket)['Contents'] if not f['Key'].endswith('.html')])
+        except Exception as e:
+             sys.exit('ERROR: ' + e)
+        if len(albums) == 0:
+            sys.exit('ERROR: There is no album in cloud')
+        for a in albums: 
+            sys.stdout.write(a + '\n')
+    else:
+        try:
+            photos = [f['Key'].split('/')[1] for f in s3.list_objects(Bucket=bucket, Prefix=args.album + '/')['Contents']]
+        except Exception as e:
+            sys.exit('ERROR: No such album in cloud')
+        if len(photos) == 1 and photos[0] == '':
+            sys.exit('ERROR: no photos in album: ' + args.album)
+        for p in photos:
+            sys.stdout.write(p + '\n')
+elif command == 'delete':
+    if args.album == None:
+        sys.exit("ERROR: Please specify album using the --album parameter.")
+    prefix = args.album + '/'
+    if args.photo is not None:
+        if not args.photo.lower().endswith(('.png', '.jpg', '.jpeg')):
+            sys.exit("ERROR: Please specify valid photo using the --photo parameter.")
+        prefix += args.photo
+    try:
+        photos = [f['Key'] for f in s3.list_objects(Bucket=bucket, Prefix=prefix)['Contents']]
+    except Exception as e:
+        sys.exit('ERROR: No such album or photo in cloud')
+    for p in photos:
+        try:
+            s3.delete_object(Bucket=bucket, Key=p)
+            sys.stdout.write(p +' was successfully deleted\n')
+        except Exception as e:
+            sys.stderr.write('WARNING: ' + str(e) + '\n')
+elif command == 'mksite':
+    try:
+        s3.put_bucket_acl(Bucket=bucket, ACL='public-read')
+        s3.put_bucket_website(Bucket=bucket, WebsiteConfiguration={'ErrorDocument': {'Key': 'error.html'}, 'IndexDocument': {'Suffix': 'index.html'}})
+        albums = set([f['Key'].split('/')[0] for f in s3.list_objects(Bucket=bucket)['Contents'] if not f['Key'].endswith('.html')])
+        if len(albums) == 0:
+            sys.exit('ERROR: There is no album in cloud')
+        index_content = ''
+        for i, a in enumerate(albums):
+            try:
+                photos = [f['Key'] for f in s3.list_objects(Bucket=bucket, Prefix=a + '/')['Contents']]
+            except Exception as e:
+                sys.exit('ERROR: No such album in cloud: ' + a)
+
+            content = ''
+            for p  in photos:
+                content += f'<img src="https://storage.yandexcloud.net/{bucket}/{p}" data-title="{p.split("/")[1]}">\n'
+            album_html = open('album_template.html', 'r').read().replace('#~content~#', content)
+            index_content += f'<li><a href="{"album" + str(i+1) + ".html"}">{a}</a></li>'
+            try:
+                s3.upload_fileobj(io.BytesIO(album_html.encode()), bucket, 'album' + str(i+1) + '.html')
+                sys.stdout.write('Page for ' + a + ' was created successfully\n')
+            except Exception as e:
+                sys.stderr.write(str(e) + '\n')
+
+        index_html = open('index_template.html', 'r').read().replace('#~content~#', index_content)
+        try:
+            s3.upload_fileobj(io.BytesIO(index_html.encode()), bucket, 'index.html')
+            sys.stdout.write('index.html was created successfully\n')
+        except Exception as e:
+            sys.stderr.write(str(e) + '\n')
+        try:
+            s3.upload_file('error_template.html', bucket, 'error.html')
+            sys.stdout.write('error.html was created successfully\n')
+        except Exception as e:
+            sys.stderr.write(str(e) + '\n')
+
+        sys.stdout.write('Your site is avalable by link: https://' + bucket + '.website.yandexcloud.net/ \n')
+            
+    except Exception as e:
+        sys.exit('ERROR: ' + str(e))
+else:
+    sys.exit('ERROR: Invalid command ' + command)
+
+exit(0)
+
