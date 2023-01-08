@@ -1,4 +1,4 @@
-# cloud-photo
+# Мукиев Мухаммад 11-907 ИТИС ВвОТ
 
 ## Installation 
 ### Run following commands in cli
